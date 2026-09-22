@@ -1,0 +1,219 @@
+import java.util.*;
+
+public class RateLimiter {
+
+    static class Bucket {
+        double tokens;
+        long lastRefill;
+
+        Bucket(double tokens, long lastRefill) {
+            this.tokens = tokens;
+            this.lastRefill = lastRefill;
+        }
+    }
+
+    String strategy;
+
+    Map<String, Deque<Long>> policyAState = new HashMap<>();
+    Map<String, Bucket> policyBState = new HashMap<>();
+
+    int totalAllowed = 0;
+    int totalRejected = 0;
+
+    RateLimiter(String strategy) {
+        if(!strategy.equals("policy_a") && !strategy.equals("policy_b")) {
+            throw new IllegalArgumentException("Unknown strategy: " + strategy);
+        }
+
+        this.strategy = strategy;
+    }
+
+    int[] check(
+        String clientId,
+        String endpoint,
+        int limit,
+        int windowMs,
+        int capacity,
+        double refillRate
+    ) {
+        int[] result;
+
+        if(strategy.equals("policy_a")) {
+            result = policyALimit(
+                clientId,
+                endpoint,
+                limit,
+                windowMs
+            );
+        } else {
+            result = policyBLimit(
+                clientId,
+                endpoint,
+                capacity,
+                refillRate
+            );
+        }
+
+        if(result[0] == 1) {
+            totalAllowed++;
+        } else {
+            totalRejected++;
+        }
+
+        return result;
+    }
+
+    int[] policyALimit(
+        String clientId,
+        String endpoint,
+        int limit,
+        int windowMs
+    ) {
+        String key = clientId + ":" + endpoint;
+
+        if(!policyAState.containsKey(key)) {
+            policyAState.put(key, new ArrayDeque<>());
+        }
+
+        Deque<Long> timestamps = policyAState.get(key);
+
+        long now = System.currentTimeMillis();
+
+        while(!timestamps.isEmpty()
+                && timestamps.peekFirst() <= now - windowMs) {
+            timestamps.removeFirst();
+        }
+
+        if(timestamps.size() < limit) {
+
+            timestamps.addLast(now);
+
+            int remaining = limit - timestamps.size();
+
+            int resetAfterMs =
+                (int)(timestamps.peekFirst() + windowMs - now);
+
+            return new int[]{
+                1,
+                remaining,
+                resetAfterMs
+            };
+        }
+
+        int resetAfterMs =
+            (int)(timestamps.peekFirst() + windowMs - now);
+
+        return new int[]{
+            0,
+            0,
+            resetAfterMs
+        };
+    }
+
+    int[] policyBLimit(
+        String clientId,
+        String endpoint,
+        int capacity,
+        double refillRate
+    ) {
+        String key = clientId + ":" + endpoint;
+
+        long now = System.currentTimeMillis();
+
+        if(!policyBState.containsKey(key)) {
+            policyBState.put(
+                key,
+                new Bucket(capacity, now)
+            );
+        }
+
+        Bucket bucket = policyBState.get(key);
+
+        double elapsedSeconds =
+            (now - bucket.lastRefill) / 1000.0;
+
+        bucket.tokens = Math.min(
+            capacity,
+            bucket.tokens + elapsedSeconds * refillRate
+        );
+
+        bucket.lastRefill = now;
+
+        if(bucket.tokens >= 1) {
+
+            bucket.tokens--;
+
+            int remaining = (int)bucket.tokens;
+
+            return new int[]{
+                1,
+                remaining,
+                0
+            };
+        }
+
+        int resetAfterMs = 0;
+
+        if(refillRate > 0) {
+            resetAfterMs =
+                (int)(
+                    ((1 - bucket.tokens) / refillRate) * 1000
+                );
+        }
+
+        return new int[]{
+            0,
+            0,
+            resetAfterMs
+        };
+    }
+
+    void stats() {
+        int activeKeys;
+
+        if(strategy.equals("policy_a")) {
+            activeKeys = policyAState.size();
+        } else {
+            activeKeys = policyBState.size();
+        }
+
+        System.out.println("strategy = " + strategy);
+        System.out.println("total allowed = " + totalAllowed);
+        System.out.println("total rejected = " + totalRejected);
+        System.out.println("active keys = " + activeKeys);
+    }
+
+    public static void main(String[] args) {
+
+        RateLimiter limiter =
+            new RateLimiter("policy_a");
+
+        int[] a = limiter.check(
+            "user1",
+            "/chat",
+            2,
+            10000,
+            0,
+            0
+        );
+
+        System.out.println(
+            Arrays.toString(a)
+        );
+
+        int[] b = limiter.check(
+            "user1",
+            "/chat",
+            2,
+            10000,
+            0,
+            0
+        );
+
+        System.out.println(
+            Arrays.toString(b)
+        );
+
+        limiter.stats();
+    }
+}
